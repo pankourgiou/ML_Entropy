@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Linear Classifier — Decision Boundary</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:sans-serif;background:#f5f5f5;display:flex;justify-content:center;padding:2rem;}
+    .container{background:white;border-radius:12px;padding:2rem;max-width:900px;width:100%;box-shadow:0 2px 12px rgba(0,0,0,0.08);}
+    h1{font-size:1.2rem;font-weight:500;color:#222;margin-bottom:0.25rem;}
+    p.sub{font-size:0.85rem;color:#888;margin-bottom:1.5rem;}
+    .controls{display:flex;flex-wrap:wrap;gap:1rem;margin-bottom:1.5rem;align-items:flex-end;}
+    .ctrl{display:flex;flex-direction:column;gap:4px;}
+    label{font-size:12px;color:#666;}
+    input[type=range]{width:140px;}
+    input[type=number]{width:80px;padding:4px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;}
+    button{padding:7px 18px;background:#4f46e5;color:white;border:none;border-radius:7px;font-size:13px;cursor:pointer;font-weight:500;}
+    button:hover{background:#4338ca;}
+    button:disabled{background:#aaa;cursor:not-allowed;}
+    .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:1.5rem;}
+    .metric{background:#f8f8f8;border-radius:8px;padding:0.75rem 1rem;}
+    .metric .val{font-size:1.4rem;font-weight:500;color:#222;}
+    .metric .lbl{font-size:12px;color:#888;margin-top:2px;}
+    .log{background:#1e1e1e;color:#d4d4d4;border-radius:8px;padding:1rem;font-size:12px;font-family:monospace;height:120px;overflow-y:auto;margin-bottom:1.5rem;}
+    .charts{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+    .chart-wrap{position:relative;height:320px;}
+    .legend{display:flex;gap:1rem;font-size:12px;color:#555;margin-bottom:0.5rem;flex-wrap:wrap;}
+    .legend span{display:flex;align-items:center;gap:5px;}
+    .dot{width:10px;height:10px;border-radius:50%;display:inline-block;}
+    @media(max-width:600px){.charts{grid-template-columns:1fr;}.metrics{grid-template-columns:1fr 1fr;}}
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Linear Classifier — Interactive Demo</h1>
+  <p class="sub">PyTorch-style binary classifier trained in-browser. Adjust hyperparameters and retrain.</p>
+
+  <div class="controls">
+    <div class="ctrl"><label>Epochs: <b id="ep-out">100</b></label><input type="range" id="epochs" min="10" max="500" step="10" value="100" oninput="document.getElementById('ep-out').textContent=this.value"></div>
+    <div class="ctrl"><label>Learning rate</label><input type="number" id="lr" value="0.01" step="0.001" min="0.0001" max="1"></div>
+    <div class="ctrl"><label>Samples: <b id="ns-out">1000</b></label><input type="range" id="nsamples" min="100" max="2000" step="100" value="1000" oninput="document.getElementById('ns-out').textContent=this.value"></div>
+    <div class="ctrl"><label>Test split: <b id="ts-out">20%</b></label><input type="range" id="testsplit" min="10" max="40" step="5" value="20" oninput="document.getElementById('ts-out').textContent=this.value+'%'"></div>
+    <div class="ctrl" style="justify-content:flex-end"><button id="trainBtn" onclick="runAll()">Train</button></div>
+  </div>
+
+  <div class="metrics">
+    <div class="metric"><div class="val" id="m-acc">—</div><div class="lbl">Test accuracy</div></div>
+    <div class="metric"><div class="val" id="m-loss">—</div><div class="lbl">Final loss</div></div>
+    <div class="metric"><div class="val" id="m-epochs">—</div><div class="lbl">Epochs trained</div></div>
+  </div>
+
+  <div class="log" id="log">Ready. Press Train to start.</div>
+
+  <div class="legend">
+    <span><span class="dot" style="background:#378ADD"></span>Class 0</span>
+    <span><span class="dot" style="background:#E24B4A"></span>Class 1</span>
+  </div>
+  <div class="charts">
+    <div>
+      <div style="font-size:13px;color:#555;margin-bottom:6px;">Decision boundary (test set)</div>
+      <div class="chart-wrap"><canvas id="boundaryChart" role="img" aria-label="Scatter plot showing decision boundary of the trained classifier on the test set"></canvas></div>
+    </div>
+    <div>
+      <div style="font-size:13px;color:#555;margin-bottom:6px;">Training loss curve</div>
+      <div class="chart-wrap"><canvas id="lossChart" role="img" aria-label="Line chart showing training loss over epochs"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---- Seeded RNG (mulberry32) ---- */
+let _seed=42;
+function rng(){_seed|=0;_seed=_seed+0x6D2B79F5|0;let t=Math.imul(_seed^_seed>>>15,1|_seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}
+function resetSeed(){_seed=42;}
+function randn(){const u1=rng()+1e-10,u2=rng();return Math.sqrt(-2*Math.log(u1))*Math.cos(2*Math.PI*u2);}
+
+/* ---- Data generation (mirrors sklearn make_classification) ---- */
+function makeClassification(n){
+  resetSeed();
+  const X=[],y=[];
+  const c0=[[-1.5,-1.5],[1.5,1.5]];
+  const c1=[[1.5,-1.5],[-1.5,1.5]];
+  for(let i=0;i<n;i++){
+    const cls=i<n/2?0:1;
+    const centers=cls===0?c0:c1;
+    const ctr=centers[Math.floor(rng()*centers.length)];
+    X.push([ctr[0]+randn()*0.8,ctr[1]+randn()*0.8]);
+    y.push(cls);
+  }
+  // shuffle
+  for(let i=n-1;i>0;i--){const j=Math.floor(rng()*(i+1));[X[i],X[j]]=[X[j],X[i]];[y[i],y[j]]=[y[j],y[i]];}
+  return{X,y};
+}
+
+function splitData(X,y,testFrac){
+  const n=X.length,nt=Math.floor(n*testFrac);
+  return{Xtr:X.slice(nt),ytr:y.slice(nt),Xte:X.slice(0,nt),yte:y.slice(0,nt)};
+}
+
+/* ---- Linear model (W: 2x2, b: 2) ---- */
+function softmax(a,b){const ea=Math.exp(a),eb=Math.exp(b),s=ea+eb;return[ea/s,eb/s];}
+
+function initModel(){
+  resetSeed();
+  return{
+    W:[[randn()*0.1,randn()*0.1],[randn()*0.1,randn()*0.1]],
+    b:[0,0]
+  };
+}
+
+function forward(model,x){
+  const{W,b}=model;
+  return[W[0][0]*x[0]+W[1][0]*x[1]+b[0], W[0][1]*x[0]+W[1][1]*x[1]+b[1]];
+}
+
+function predict(model,x){
+  const logits=forward(model,x);
+  return logits[0]>logits[1]?0:1;
+}
+
+function crossEntropyLoss(model,X,y){
+  let loss=0;
+  for(let i=0;i<X.length;i++){
+    const logits=forward(model,X[i]);
+    const mx=Math.max(logits[0],logits[1]);
+    const l0=logits[0]-mx,l1=logits[1]-mx;
+    const logSumExp=mx+Math.log(Math.exp(l0)+Math.exp(l1));
+    loss+=logits[y[i]]-logSumExp;
+  }
+  return -loss/X.length;
+}
+
+function trainStep(model,X,y,lr){
+  const n=X.length;
+  const dW=[[0,0],[0,0]],db=[0,0];
+  for(let i=0;i<n;i++){
+    const logits=forward(model,X[i]);
+    const probs=softmax(logits[0],logits[1]);
+    const err=[probs[0]-(y[i]===0?1:0), probs[1]-(y[i]===1?1:0)];
+    for(let c=0;c<2;c++){
+      dW[0][c]+=X[i][0]*err[c];
+      dW[1][c]+=X[i][1]*err[c];
+      db[c]+=err[c];
+    }
+  }
+  for(let f=0;f<2;f++)for(let c=0;c<2;c++) model.W[f][c]-=lr*dW[f][c]/n;
+  for(let c=0;c<2;c++) model.b[c]-=lr*db[c]/n;
+}
+
+/* ---- Charts ---- */
+let boundaryChart=null,lossChart=null;
+
+function initCharts(){
+  if(boundaryChart)boundaryChart.destroy();
+  if(lossChart)lossChart.destroy();
+  boundaryChart=new Chart(document.getElementById('boundaryChart'),{
+    type:'scatter',
+    data:{datasets:[
+      {label:'Class 0',data:[],backgroundColor:'rgba(55,138,221,0.7)',pointRadius:4},
+      {label:'Class 1',data:[],backgroundColor:'rgba(226,75,74,0.7)',pointRadius:4},
+      {label:'Region 0',data:[],backgroundColor:'rgba(55,138,221,0.08)',pointRadius:3,pointStyle:'rect'},
+      {label:'Region 1',data:[],backgroundColor:'rgba(226,75,74,0.08)',pointRadius:3,pointStyle:'rect'}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{title:{display:true,text:'Feature 1'},grid:{color:'rgba(0,0,0,0.05)'}},
+              y:{title:{display:true,text:'Feature 2'},grid:{color:'rgba(0,0,0,0.05)'}}}}
+  });
+  lossChart=new Chart(document.getElementById('lossChart'),{
+    type:'line',
+    data:{datasets:[{label:'Loss',data:[],borderColor:'#4f46e5',backgroundColor:'rgba(79,70,229,0.08)',fill:true,tension:0.3,pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{title:{display:true,text:'Epoch'},grid:{color:'rgba(0,0,0,0.05)'}},
+              y:{title:{display:true,text:'Loss'},grid:{color:'rgba(0,0,0,0.05)'}}}}
+  });
+}
+
+function updateBoundary(model,Xte,yte){
+  const xs=Xte.map(r=>r[0]),ys=Xte.map(r=>r[1]);
+  const xMin=Math.min(...xs)-0.5,xMax=Math.max(...xs)+0.5;
+  const yMin=Math.min(...ys)-0.5,yMax=Math.max(...ys)+0.5;
+  const steps=40;
+  const r0=[],r1=[];
+  for(let i=0;i<=steps;i++)for(let j=0;j<=steps;j++){
+    const px=xMin+(xMax-xMin)*i/steps,py=yMin+(yMax-yMin)*j/steps;
+    (predict(model,[px,py])===0?r0:r1).push({x:+px.toFixed(3),y:+py.toFixed(3)});
+  }
+  const c0=[],c1=[];
+  for(let i=0;i<Xte.length;i++)(yte[i]===0?c0:c1).push({x:+Xte[i][0].toFixed(3),y:+Xte[i][1].toFixed(3)});
+  const ds=boundaryChart.data.datasets;
+  ds[0].data=c0;ds[1].data=c1;ds[2].data=r0;ds[3].data=r1;
+  boundaryChart.update();
+}
+
+function updateLoss(history){
+  lossChart.data.labels=history.map((_,i)=>i+1);
+  lossChart.data.datasets[0].data=history.map(v=>+v.toFixed(4));
+  lossChart.update();
+}
+
+/* ---- Main ---- */
+function log(msg){const el=document.getElementById('log');el.textContent+='\n'+msg;el.scrollTop=el.scrollHeight;}
+
+function runAll(){
+  const btn=document.getElementById('trainBtn');
+  btn.disabled=true;
+  document.getElementById('log').textContent='';
+  initCharts();
+
+  const epochs=+document.getElementById('epochs').value;
+  const lr=+document.getElementById('lr').value;
+  const n=+document.getElementById('nsamples').value;
+  const testFrac=+document.getElementById('testsplit').value/100;
+
+  log(`Generating ${n} samples...`);
+  const{X,y}=makeClassification(n);
+  const{Xtr,ytr,Xte,yte}=splitData(X,y,testFrac);
+  log(`Train: ${Xtr.length} | Test: ${Xte.length}`);
+
+  const model=initModel();
+  const history=[];
+  let lastLoss=0;
+
+  log(`Training for ${epochs} epochs (lr=${lr})...`);
+  for(let e=0;e<epochs;e++){
+    trainStep(model,Xtr,ytr,lr);
+    lastLoss=crossEntropyLoss(model,Xtr,ytr);
+    history.push(lastLoss);
+    if((e+1)%Math.max(1,Math.floor(epochs/10))===0)
+      log(`Epoch [${e+1}/${epochs}] Loss: ${lastLoss.toFixed(4)}`);
+  }
+
+  let correct=0;
+  for(let i=0;i<Xte.length;i++)if(predict(model,Xte[i])===yte[i])correct++;
+  const acc=(correct/Xte.length*100).toFixed(2);
+
+  log(`Accuracy on test data: ${acc}%`);
+
+  document.getElementById('m-acc').textContent=acc+'%';
+  document.getElementById('m-loss').textContent=lastLoss.toFixed(4);
+  document.getElementById('m-epochs').textContent=epochs;
+
+  updateBoundary(model,Xte,yte);
+  updateLoss(history);
+  btn.disabled=false;
+}
+
+initCharts();
+runAll();
+</script>
+</body>
+</html>
+
